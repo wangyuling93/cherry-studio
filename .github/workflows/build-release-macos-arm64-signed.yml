@@ -9,7 +9,6 @@
 #   APPLE_DEVELOPER_ID_P12
 #   APPLE_DEVELOPER_ID_P12_PASSWORD
 #   APPLE_APP_SPECIFIC_PASSWORD
-# Environment variables:
 #   APPLE_ID
 #   APPLE_TEAM_ID
 #
@@ -195,8 +194,8 @@ jobs:
         shell: bash
         env:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_ID: ${{ vars.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
           CSC_LINK: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -208,8 +207,8 @@ jobs:
           set -euo pipefail
 
           : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
-          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
-          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
+          : "${APPLE_ID:?Missing codesigning secret APPLE_ID}"
+          : "${APPLE_TEAM_ID:?Missing codesigning secret APPLE_TEAM_ID}"
           : "${CSC_KEY_PASSWORD:?Missing codesigning secret APPLE_DEVELOPER_ID_P12_PASSWORD}"
           : "${CSC_LINK:?Missing codesigning secret APPLE_DEVELOPER_ID_P12}"
 
@@ -224,8 +223,8 @@ jobs:
         shell: bash
         env:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_ID: ${{ vars.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
 
@@ -242,6 +241,15 @@ jobs:
           report_path="${report_dir}/dmg-notarytool-submit.json"
           mkdir -p "$report_dir"
 
+          stop_notarization_heartbeat() {
+            if [[ -n "${heartbeat_pid:-}" ]]; then
+              kill "$heartbeat_pid" 2>/dev/null || true
+              wait "$heartbeat_pid" 2>/dev/null || true
+              heartbeat_pid=""
+            fi
+          }
+          trap stop_notarization_heartbeat EXIT
+
           xcrun notarytool submit "$dmg_path" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
@@ -249,7 +257,32 @@ jobs:
             --wait \
             --timeout 45m \
             --output-format json \
-            | tee "$report_path"
+            > "$report_path" &
+          notarytool_pid=$!
+
+          echo "Waiting for Apple notarization; notarytool JSON is emitted only when processing finishes."
+          (
+            while sleep 30; do
+              if ! kill -0 "$notarytool_pid" 2>/dev/null; then
+                break
+              fi
+              echo "Still waiting for Apple notarization at $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+            done
+          ) &
+          heartbeat_pid=$!
+
+          if wait "$notarytool_pid"; then
+            notarytool_status=0
+          else
+            notarytool_status=$?
+          fi
+          stop_notarization_heartbeat
+          trap - EXIT
+          cat "$report_path"
+
+          if [[ "$notarytool_status" -ne 0 ]]; then
+            exit "$notarytool_status"
+          fi
 
           python3 - "$report_path" <<'PY'
           import json

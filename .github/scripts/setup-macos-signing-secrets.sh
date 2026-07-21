@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Configure the GitHub environment values used to sign and notarize macOS
-# release artifacts. Secret values are read interactively so they do not appear
-# in shell history or the process list.
+# Configure the GitHub environment secrets used to sign and notarize macOS
+# release artifacts. Credential values are read interactively so they do not
+# appear in shell history or the process list.
 
 set -euo pipefail
 
@@ -271,28 +271,35 @@ printf '%s' "$p12_password" |
     --env "$environment_name" \
     --repo "$repository"
 
-echo "Uploading notarization credential..."
+echo "Uploading notarization credentials and account metadata..."
 printf '%s' "$app_specific_password" |
   gh secret set APPLE_APP_SPECIFIC_PASSWORD \
     --env "$environment_name" \
     --repo "$repository"
 
-echo "Setting non-secret Apple account metadata..."
 printf '%s' "$apple_id" |
-  gh variable set APPLE_ID \
+  gh secret set APPLE_ID \
     --env "$environment_name" \
     --repo "$repository"
 
 printf '%s' "$team_id" |
-  gh variable set APPLE_TEAM_ID \
+  gh secret set APPLE_TEAM_ID \
     --env "$environment_name" \
     --repo "$repository"
+
+# Remove legacy configuration variables so account metadata cannot be rendered
+# unmasked by older workflow revisions.
+gh variable delete APPLE_ID \
+  --env "$environment_name" \
+  --repo "$repository" \
+  >/dev/null 2>&1 || true
+gh variable delete APPLE_TEAM_ID \
+  --env "$environment_name" \
+  --repo "$repository" \
+  >/dev/null 2>&1 || true
 
 echo
 echo "Configured GitHub secrets:"
 gh secret list --env "$environment_name" --repo "$repository"
-echo
-echo "Configured GitHub variables:"
-gh variable list --env "$environment_name" --repo "$repository"
 echo
 echo "macOS signing settings are ready for build-release-macos-arm64-signed."

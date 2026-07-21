@@ -32,7 +32,7 @@ on:
         type: string
         default: ""
       tag:
-        description: Optional release tag; leave empty to derive it from the version
+        description: Optional release tag; leave empty to derive it from the version and commit
         required: false
         type: string
         default: ""
@@ -76,12 +76,13 @@ jobs:
             exit 1
           }
 
-          default_tag="${TAG_PREFIX}${release_version}"
+          tag_base="${TAG_PREFIX}${release_version}"
+          default_tag="${tag_base}-${GITHUB_SHA:0:10}"
           release_tag="${INPUT_TAG:-${default_tag}}"
-          if [[ "$release_tag" != "$default_tag" ]]; then
-            suffix="${release_tag#"$default_tag"}"
-            if [[ "$release_tag" != "$default_tag"* || ! "$suffix" =~ ^[-+][0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
-              echo "Tag must be '${default_tag}' or use that prefix followed by a unique -/+ suffix." >&2
+          if [[ "$release_tag" != "$tag_base" ]]; then
+            suffix="${release_tag#"$tag_base"}"
+            if [[ "$release_tag" != "$tag_base"* || ! "$suffix" =~ ^[-+][0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+              echo "Tag must be '${tag_base}' or use that prefix followed by a unique -/+ suffix." >&2
               exit 1
             fi
           fi

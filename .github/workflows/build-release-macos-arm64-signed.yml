@@ -1,0 +1,348 @@
+# Fork-local Apple Silicon release: a signed, notarized, and stapled DMG
+# containing the Cherry Studio application. This workflow builds only arm64
+# and produces only a DMG (no ZIP).
+#
+# Configure the protected `codesigning` GitHub environment first with:
+#   .github/scripts/setup-macos-signing-secrets.sh
+#
+# Environment secrets:
+#   APPLE_DEVELOPER_ID_P12
+#   APPLE_DEVELOPER_ID_P12_PASSWORD
+#   APPLE_APP_SPECIFIC_PASSWORD
+# Environment variables:
+#   APPLE_ID
+#   APPLE_TEAM_ID
+#
+# By default this workflow only uploads an Actions artifact. Enable
+# `publish_github_release` to reserve a tag and publish a prerelease.
+
+name: Build release macOS arm64 signed DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_github_release:
+        description: Create a GitHub prerelease and attach the signed DMG
+        required: false
+        type: boolean
+        default: false
+      release_version:
+        description: Version to embed; leave empty to use package.json
+        required: false
+        type: string
+        default: ""
+      tag:
+        description: Optional release tag; leave empty to derive it from the version
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || inputs.tag || 'package-version' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-metadata:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve version and tag
+        id: resolve
+        shell: bash
+        env:
+          INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_PREFIX: cherry-studio-macos-arm64-v
+        run: |
+          set -euo pipefail
+
+          package_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          release_version="${INPUT_RELEASE_VERSION:-${package_version}}"
+          version_re='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?'
+
+          [[ "$release_version" =~ ^${version_re}$ ]] || {
+            echo "Unsupported release version: ${release_version}" >&2
+            exit 1
+          }
+
+          default_tag="${TAG_PREFIX}${release_version}"
+          release_tag="${INPUT_TAG:-${default_tag}}"
+          if [[ "$release_tag" != "$default_tag" ]]; then
+            suffix="${release_tag#"$default_tag"}"
+            if [[ "$release_tag" != "$default_tag"* || ! "$suffix" =~ ^[-+][0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+              echo "Tag must be '${default_tag}' or use that prefix followed by a unique -/+ suffix." >&2
+              exit 1
+            fi
+          fi
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "release_version=${release_version}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Cherry Studio ${release_version}; release tag ${release_tag}"
+
+  reserve-release-tag:
+    if: ${{ inputs.publish_github_release }}
+    needs: resolve-metadata
+    name: Reserve release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Reserve tag before the long build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve-metadata.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          existing_sha="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${RELEASE_TAG}" \
+              --jq ".[] | select(.ref == \"refs/tags/${RELEASE_TAG}\") | .object.sha"
+          )"
+          if [[ -n "$existing_sha" ]]; then
+            if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
+              echo "Tag '${RELEASE_TAG}' already points to ${existing_sha}, not ${GITHUB_SHA}." >&2
+              echo "Choose a unique tag for this build." >&2
+              exit 1
+            fi
+            echo "Tag '${RELEASE_TAG}' already reserves this commit; continuing retry."
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_TAG}" \
+              -f sha="$GITHUB_SHA" \
+              >/dev/null
+            echo "Reserved tag '${RELEASE_TAG}' at ${GITHUB_SHA}."
+          fi
+
+  build:
+    if: >-
+      ${{ always() && needs.resolve-metadata.result == 'success' &&
+          (needs.reserve-release-tag.result == 'success' ||
+           needs.reserve-release-tag.result == 'skipped') }}
+    needs:
+      - resolve-metadata
+      - reserve-release-tag
+    name: Build, sign, notarize, and staple
+    runs-on: macos-26
+    timeout-minutes: 180
+    environment:
+      name: codesigning
+    permissions:
+      contents: read
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+      RELEASE_VERSION: ${{ needs.resolve-metadata.outputs.release_version }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Cache Electron Builder downloads
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: ${{ runner.os }}-${{ runner.arch }}-electron-builder-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-electron-builder-
+
+      - name: Install macOS build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! brew list python-setuptools >/dev/null 2>&1; then
+            brew install python-setuptools
+          fi
+
+      - name: Install project dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set package version
+        shell: bash
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Build signed and notarized Apple Silicon app and DMG
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          CSC_LINK: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAIN_VITE_CHERRYAI_CLIENT_SECRET: ${{ secrets.MAIN_VITE_CHERRYAI_CLIENT_SECRET }}
+          MAIN_VITE_MINERU_API_KEY: ${{ secrets.MAIN_VITE_MINERU_API_KEY }}
+          RENDERER_VITE_AIHUBMIX_SECRET: ${{ secrets.RENDERER_VITE_AIHUBMIX_SECRET }}
+          RENDERER_VITE_PPIO_APP_SECRET: ${{ secrets.RENDERER_VITE_PPIO_APP_SECRET }}
+        run: |
+          set -euo pipefail
+
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
+          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
+          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
+          : "${CSC_KEY_PASSWORD:?Missing codesigning secret APPLE_DEVELOPER_ID_P12_PASSWORD}"
+          : "${CSC_LINK:?Missing codesigning secret APPLE_DEVELOPER_ID_P12}"
+
+          pnpm build
+          pnpm exec electron-builder \
+            --mac dmg \
+            --arm64 \
+            --publish never \
+            -c.dmg.sign=true
+
+      - name: Notarize and staple DMG
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          dmg_count="$(find dist -maxdepth 1 -type f -name '*-arm64.dmg' | wc -l | tr -d ' ')"
+          if [[ "$dmg_count" != "1" ]]; then
+            echo "Expected exactly one arm64 DMG, found ${dmg_count}." >&2
+            find dist -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+          dmg_path="$(find dist -maxdepth 1 -type f -name '*-arm64.dmg' -print -quit)"
+
+          codesign --verify --strict --verbose=2 "$dmg_path"
+          report_dir="macos-notarization/arm64"
+          report_path="${report_dir}/dmg-notarytool-submit.json"
+          mkdir -p "$report_dir"
+
+          xcrun notarytool submit "$dmg_path" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait \
+            --timeout 45m \
+            --output-format json \
+            | tee "$report_path"
+
+          python3 - "$report_path" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          if report.get("status") != "Accepted":
+              raise SystemExit(f"Notarization was not accepted: {report}")
+          PY
+
+          xcrun stapler staple -v "$dmg_path"
+          xcrun stapler validate -v "$dmg_path"
+
+          asset_dir="dist/release-assets"
+          asset_path="${asset_dir}/Cherry-Studio-${RELEASE_VERSION}-arm64.dmg"
+          mkdir -p "$asset_dir"
+          cp "$dmg_path" "$asset_path"
+          shasum -a 256 "$asset_path"
+          echo "DMG_PATH=${asset_path}" >> "$GITHUB_ENV"
+
+      - name: Verify signed DMG and app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hdiutil verify "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          xcrun stapler validate -v "$DMG_PATH"
+
+          mount_dir="${RUNNER_TEMP}/cherry-studio-dmg-mount"
+          rm -rf "$mount_dir"
+          mkdir -p "$mount_dir"
+          mounted=false
+          cleanup_mount() {
+            if [[ "$mounted" == "true" ]]; then
+              diskutil eject "$mount_dir" >/dev/null
+            fi
+          }
+          trap cleanup_mount EXIT
+
+          hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$mount_dir"
+          mounted=true
+
+          app_count="$(find "$mount_dir" -mindepth 1 -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')"
+          if [[ "$app_count" != "1" ]]; then
+            echo "Expected exactly one app bundle in the DMG, found ${app_count}." >&2
+            find "$mount_dir" -mindepth 1 -maxdepth 1 -print >&2
+            exit 1
+          fi
+          app_path="$(find "$mount_dir" -mindepth 1 -maxdepth 1 -type d -name '*.app' -print -quit)"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate -v "$app_path"
+          lipo "$app_path/Contents/MacOS/$executable_name" -verify_arch arm64
+
+          cleanup_mount
+          mounted=false
+          trap - EXIT
+
+      - name: Upload signed DMG
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cherry-studio-${{ needs.resolve-metadata.outputs.release_version }}-macos-arm64-signed
+          path: dist/release-assets/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    if: ${{ inputs.publish_github_release && needs.build.result == 'success' }}
+    needs:
+      - resolve-metadata
+      - reserve-release-tag
+      - build
+    name: Publish GitHub prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed DMG
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cherry-studio-${{ needs.resolve-metadata.outputs.release_version }}-macos-arm64-signed
+          path: release-assets
+
+      - name: Publish prerelease
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ needs.resolve-metadata.outputs.release_tag }}
+          name: Cherry Studio ${{ needs.resolve-metadata.outputs.release_version }} macOS arm64
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*.dmg

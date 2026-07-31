@@ -3,6 +3,7 @@ import {
   dispatchHandle,
   getMetadataByPath,
   readByPath,
+  readChunkByPath,
   safeOpen,
   showInFolder as showPathInFolder,
   writeIfUnchangedByPath
@@ -13,7 +14,7 @@ import { fileErrorCodes } from '@shared/ipc/errors/file'
 import { IpcError } from '@shared/ipc/errors/IpcError'
 import type { fileRequestSchemas } from '@shared/ipc/schemas/file'
 import type { IpcHandlersFor } from '@shared/ipc/types'
-import type { CreateInternalEntryIpcParams, FilePath } from '@shared/types/file'
+import type { CreateInternalEntryIpcParams } from '@shared/types/file'
 
 /**
  * Thin adapters for FileManager-backed file routes. Pure SQL file-entry reads stay
@@ -22,15 +23,22 @@ import type { CreateInternalEntryIpcParams, FilePath } from '@shared/types/file'
 export const fileHandlers: IpcHandlersFor<typeof fileRequestSchemas> = {
   'file.read': async ({ handle, options }) => {
     const fileManager = application.get('FileManager')
+    if (options.mode === 'range') {
+      return dispatchHandle(
+        handle as FileHandle,
+        (entryId) => fileManager.readChunk(entryId, options.offset, options.length),
+        (path) => readChunkByPath(path, options.offset, options.length)
+      )
+    }
     return dispatchHandle(
       handle as FileHandle,
-      (entryId) => fileManager.read(entryId, options),
-      (path) => readByPath(path, options)
+      (entryId) => fileManager.read(entryId, { encoding: options.encoding }),
+      (path) => readByPath(path, { encoding: options.encoding })
     )
   },
   'file.write_if_unchanged': async ({ path, data, expectedVersion }) => {
     try {
-      return await writeIfUnchangedByPath(path as FilePath, data, expectedVersion)
+      return await writeIfUnchangedByPath(path, data, expectedVersion)
     } catch (error) {
       if (error instanceof PathStaleVersionError) {
         throw new IpcError(fileErrorCodes.STALE_VERSION, error.message, {

@@ -51,6 +51,15 @@ const PINNED_CODE_TAB: Tab = {
   isPinned: true
 }
 
+const HOME_TAB: Tab = {
+  id: 'home',
+  type: 'route',
+  url: '/app/chat',
+  title: '',
+  lastAccessTime: 0,
+  isDormant: false
+}
+
 // Stable reference: re-renders are then driven only by the i18n.language change,
 // not by a fresh pinnedTabs identity — which is what makes the test catch a dropped
 // i18n.language dependency in the tabs useMemo.
@@ -178,6 +187,9 @@ function BatchCloseControls() {
       <button type="button" onClick={() => setActiveTab('home')}>
         Activate Home
       </button>
+      <button type="button" onClick={() => setActiveTab('d')}>
+        Activate D
+      </button>
       <button type="button" onClick={() => closeTabs(['b', 'c'])}>
         Close B and C
       </button>
@@ -189,6 +201,9 @@ function BatchCloseControls() {
       </button>
       <button type="button" onClick={() => closeTabs(['b', 'c'], 'c')}>
         Close B and C keeping C
+      </button>
+      <button type="button" onClick={() => closeTabs(['d'])}>
+        Close D
       </button>
       <button type="button" onClick={() => closeTabs(['home', 'b', 'c', 'd'], 'files')}>
         Close all normals to Files
@@ -313,15 +328,7 @@ describe('TabsProvider', () => {
   it('refreshes localized route tab titles when the app language changes', async () => {
     // A fresh element each render so React doesn't bail out on referential equality.
     const renderUi = () => (
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <PinnedRouteTitle />
       </TabsProvider>
     )
@@ -361,19 +368,30 @@ describe('TabsProvider', () => {
     await waitFor(() => expect(setPinnedTabsMock).toHaveBeenCalled())
   })
 
+  it('removes a menu-closed pinned tab from the persistent pinned list', async () => {
+    render(
+      <TabsProvider initialDefaultTab={HOME_TAB}>
+        <CloseTabOnMount tabId="files" />
+      </TabsProvider>
+    )
+
+    // The mocked pinned cache never re-renders, so assert on the persisted write:
+    // the pinned list must drop the tab, or it resurrects on restart.
+    await waitFor(() => expect(setPinnedTabsMock).toHaveBeenCalled())
+    expect(screen.getByTestId('active-tab-id')).toHaveTextContent('home')
+
+    // Mount also fires a one-time pinned-session hydration write, so the close's
+    // functional updater isn't necessarily the last call — find it explicitly.
+    const updater = setPinnedTabsMock.mock.calls.map((call) => call[0]).find((arg) => typeof arg === 'function')
+    expect(typeof updater).toBe('function')
+    expect(updater([PINNED_FILES_TAB])).toEqual([])
+  })
+
   it('drops legacy assistant-library pinned tabs when restoring the main tab list', async () => {
     pinnedTabsValue = [LEGACY_LIBRARY_PINNED_TAB, PINNED_FILES_TAB]
 
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <TabIds />
       </TabsProvider>
     )
@@ -389,15 +407,7 @@ describe('TabsProvider', () => {
     pinnedTabsValue = [PINNED_OPENCLAW_TAB, PINNED_FILES_TAB]
 
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <TabSnapshot />
       </TabsProvider>
     )
@@ -413,15 +423,7 @@ describe('TabsProvider', () => {
 
   it('closes active and adjacent tabs atomically when closing a batch', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <BatchCloseControls />
       </TabsProvider>
     )
@@ -435,20 +437,13 @@ describe('TabsProvider', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close B and C' }))
 
     await waitFor(() => expect(screen.getByTestId('tab-ids')).toHaveTextContent('files,home,d'))
-    expect(screen.getByTestId('active-tab-id')).toHaveTextContent('home')
+    // Chrome-style: the surviving right neighbor takes over the active slot.
+    expect(screen.getByTestId('active-tab-id')).toHaveTextContent('d')
   })
 
   it('activates the designated survivor instead of the nearest neighbor when the active tab is batch-closed', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <BatchCloseControls />
       </TabsProvider>
     )
@@ -470,15 +465,7 @@ describe('TabsProvider', () => {
 
   it('wakes a dormant survivor when batch close activates it', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <BatchCloseControls />
       </TabsProvider>
     )
@@ -503,16 +490,7 @@ describe('TabsProvider', () => {
 
   it('wakes the active tab when it is unexpectedly dormant', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}
-        includePinnedTabs={false}>
+      <TabsProvider initialDefaultTab={HOME_TAB} includePinnedTabs={false}>
         <BatchCloseControls />
       </TabsProvider>
     )
@@ -530,15 +508,7 @@ describe('TabsProvider', () => {
 
   it('falls back to the nearest neighbor when the designated survivor is itself closed', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <BatchCloseControls />
       </TabsProvider>
     )
@@ -549,27 +519,37 @@ describe('TabsProvider', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Activate C' }))
     await waitFor(() => expect(screen.getByTestId('active-tab-id')).toHaveTextContent('c'))
 
-    // activateId 'c' is inside the closing set, so it cannot survive — the
-    // nearest-neighbor rule applies (b closes too, so home wins).
+    // activateId 'c' is inside the closing set, so it cannot survive. The
+    // Chrome-style fallback selects the right neighbor that slides into place.
     fireEvent.click(screen.getByRole('button', { name: 'Close B and C keeping C' }))
 
     await waitFor(() => expect(screen.getByTestId('tab-ids')).toHaveTextContent('files,home,d'))
-    expect(screen.getByTestId('active-tab-id')).toHaveTextContent('home')
+    expect(screen.getByTestId('active-tab-id')).toHaveTextContent('d')
+  })
+
+  it('falls back to the left neighbor when the active tab is last in the strip', async () => {
+    render(
+      <TabsProvider initialDefaultTab={HOME_TAB}>
+        <BatchCloseControls />
+      </TabsProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Seed tabs' }))
+    await waitFor(() => expect(screen.getByTestId('tab-ids')).toHaveTextContent('files,home,b,c,d'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Activate D' }))
+    await waitFor(() => expect(screen.getByTestId('active-tab-id')).toHaveTextContent('d'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close D' }))
+
+    await waitFor(() => expect(screen.getByTestId('tab-ids')).toHaveTextContent('files,home,b,c'))
+    expect(screen.getByTestId('active-tab-id')).toHaveTextContent('c')
   })
 
   it('wakes a dormant pinned survivor through the pinned store', async () => {
     pinnedTabsValue = [{ ...PINNED_FILES_TAB, isDormant: true }]
 
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}>
+      <TabsProvider initialDefaultTab={HOME_TAB}>
         <BatchCloseControls />
       </TabsProvider>
     )
@@ -594,16 +574,7 @@ describe('TabsProvider', () => {
 
   it('opens launchpad when closing the only tab', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}
-        includePinnedTabs={false}>
+      <TabsProvider initialDefaultTab={HOME_TAB} includePinnedTabs={false}>
         <CloseTabOnMount tabId="home" />
       </TabsProvider>
     )
@@ -615,16 +586,7 @@ describe('TabsProvider', () => {
 
   it('does not open launchpad when closing one tab while another remains', async () => {
     render(
-      <TabsProvider
-        initialDefaultTab={{
-          id: 'home',
-          type: 'route',
-          url: '/app/chat',
-          title: '',
-          lastAccessTime: 0,
-          isDormant: false
-        }}
-        includePinnedTabs={false}>
+      <TabsProvider initialDefaultTab={HOME_TAB} includePinnedTabs={false}>
         <CloseHomeAfterSecondTabOpens />
       </TabsProvider>
     )

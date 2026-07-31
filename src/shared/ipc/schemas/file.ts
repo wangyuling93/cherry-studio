@@ -1,12 +1,16 @@
 import {
-  AbsolutePathSchema,
   DanglingStateSchema,
   FileEntryIdSchema,
   FileEntrySchema,
   FileHandleSchema,
   SafeNameSchema
 } from '@shared/data/types/file'
-import { FileVersionSchema, PhysicalFileMetadataSchema, SafeExtSchema } from '@shared/types/file'
+import {
+  AbsoluteFilePathSchema,
+  FileVersionSchema,
+  PhysicalFileMetadataSchema,
+  SafeExtSchema
+} from '@shared/types/file'
 import * as z from 'zod'
 
 import { defineRoute } from '../define'
@@ -16,6 +20,8 @@ import { uint8ArraySchema } from './common'
 export const FILE_IPC_MAX_BATCH_IDS = 500
 /** Maximum items accepted by one internal-entry batch-create IPC call. */
 export const FILE_IPC_MAX_BATCH_CREATE_ITEMS = 100
+/** Maximum bytes returned by one range-read IPC call. */
+export const FILE_IPC_MAX_READ_CHUNK_BYTES = 4 * 1024 * 1024
 
 const fileEntryIdsInputSchema = z.strictObject({
   ids: z.array(FileEntryIdSchema).max(FILE_IPC_MAX_BATCH_IDS)
@@ -35,10 +41,16 @@ const batchCreateResultSchema = z.strictObject({
   failed: z.array(z.strictObject({ sourceRef: z.string(), error: z.string() }))
 })
 
-const binaryReadInputSchema = z.strictObject({
-  handle: FileHandleSchema,
-  options: z.strictObject({ encoding: z.literal('binary') })
-})
+const binaryReadOptionsSchema = z.discriminatedUnion('mode', [
+  z.strictObject({ mode: z.literal('full'), encoding: z.literal('binary') }),
+  z.strictObject({
+    mode: z.literal('range'),
+    offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    length: z.number().int().positive().max(FILE_IPC_MAX_READ_CHUNK_BYTES)
+  })
+])
+
+const binaryReadInputSchema = z.strictObject({ handle: FileHandleSchema, options: binaryReadOptionsSchema })
 
 const binaryReadResultSchema = z.strictObject({
   content: uint8ArraySchema,
@@ -47,20 +59,20 @@ const binaryReadResultSchema = z.strictObject({
 })
 
 const writeIfUnchangedInputSchema = z.strictObject({
-  path: AbsolutePathSchema,
+  path: AbsoluteFilePathSchema,
   data: uint8ArraySchema,
   expectedVersion: FileVersionSchema
 })
 
 // TODO(file-ipc): Unify these schemas with the branded transport types in
-// `src/shared/types/file/ipc.ts`. `FilePath`, `Base64String`, and `UrlString` are
+// `src/shared/types/file/ipc.ts`. `AbsoluteFilePath`, `Base64String`, and `UrlString` are
 // TS-only aliases while their runtime schemas live elsewhere, so a successful
 // Zod parse still cannot prove `CreateInternalEntryIpcParams` without an `as`
 // cast in the handler. Keeping the type and schema definitions separate risks
 // future drift; refactor them to share one source of truth before migrating the
 // remaining File IPC surface.
 const createInternalEntryInputSchema = z.discriminatedUnion('source', [
-  z.strictObject({ source: z.literal('path'), path: AbsolutePathSchema }),
+  z.strictObject({ source: z.literal('path'), path: AbsoluteFilePathSchema }),
   z.strictObject({ source: z.literal('url'), url: z.url() }),
   z.strictObject({ source: z.literal('base64'), data: z.string().min(1), name: SafeNameSchema.optional() }),
   z.strictObject({
@@ -90,7 +102,7 @@ export const fileRequestSchemas = {
   }),
   'file.batch_get_physical_paths': defineRoute({
     input: fileEntryIdsInputSchema,
-    output: z.record(z.string(), AbsolutePathSchema.nullable())
+    output: z.record(z.string(), AbsoluteFilePathSchema.nullable())
   }),
   'file.batch_get_dangling_states': defineRoute({
     input: fileEntryIdsInputSchema,

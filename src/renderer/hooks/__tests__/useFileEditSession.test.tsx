@@ -10,11 +10,11 @@ vi.mock('@renderer/ipc', () => ({ ipcApi: ipcMocks }))
 
 import { fileErrorCodes } from '@shared/ipc/errors/file'
 import { IpcError } from '@shared/ipc/errors/IpcError'
-import type { FilePath } from '@shared/types/file'
+import type { AbsoluteFilePath } from '@shared/types/file'
 
 import { FILE_EDIT_MAX_SIZE_BYTES, useFileEditSession } from '../useFileEditSession'
 
-const path = '/ws/notes.txt' as FilePath
+const path = '/ws/notes.txt' as AbsoluteFilePath
 
 function utf8(content: string): Uint8Array {
   return new TextEncoder().encode(content)
@@ -56,7 +56,7 @@ describe('useFileEditSession', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'))
     expect(ipcMocks.request).toHaveBeenCalledWith('file.read', {
       handle: { kind: 'path', path },
-      options: { encoding: 'binary' }
+      options: { mode: 'full', encoding: 'binary' }
     })
     expect(result.current.draft).toBe('hello\n')
     expect(result.current.savedContent).toBe('hello\n')
@@ -578,7 +578,7 @@ describe('useFileEditSession', () => {
 
         expect(ipcMocks.request).toHaveBeenCalledWith('file.read', {
           handle: { kind: 'path', path },
-          options: { encoding: 'binary' }
+          options: { mode: 'full', encoding: 'binary' }
         })
         expect(result.current.savedContent).toBe('a')
         expect(result.current.conflict).toBe(false)

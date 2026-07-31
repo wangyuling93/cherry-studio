@@ -1,11 +1,12 @@
 import type * as FileDispatchModule from '@main/services/file/internal/dispatch'
-import type { FilePath } from '@shared/types/file'
+import type { AbsoluteFilePath } from '@shared/types/file'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
   appGetMock,
   getMetadataByPathMock,
   readByPathMock,
+  readChunkByPathMock,
   safeOpenMock,
   showPathInFolderMock,
   writeIfUnchangedByPathMock
@@ -13,6 +14,7 @@ const {
   appGetMock: vi.fn(),
   getMetadataByPathMock: vi.fn(),
   readByPathMock: vi.fn(),
+  readChunkByPathMock: vi.fn(),
   safeOpenMock: vi.fn(),
   showPathInFolderMock: vi.fn(),
   writeIfUnchangedByPathMock: vi.fn()
@@ -25,6 +27,7 @@ vi.mock('@main/services/file', async () => {
     dispatchHandle,
     getMetadataByPath: getMetadataByPathMock,
     readByPath: readByPathMock,
+    readChunkByPath: readChunkByPathMock,
     safeOpen: safeOpenMock,
     showInFolder: showPathInFolderMock,
     writeIfUnchangedByPath: writeIfUnchangedByPathMock
@@ -60,6 +63,7 @@ const fileManager = {
   batchPermanentDelete: vi.fn(),
   emptyTrash: vi.fn(),
   rename: vi.fn(),
+  readChunk: vi.fn(),
   open: vi.fn(),
   showInFolder: vi.fn(),
   batchCreateInternalEntries: vi.fn()
@@ -82,7 +86,10 @@ describe('fileHandlers', () => {
 
     await expect(
       fileHandlers['file.read'](
-        { handle: { kind: 'path', path: '/tmp/report.md' }, options: { encoding: 'binary' } },
+        {
+          handle: { kind: 'path', path: '/tmp/report.md' as AbsoluteFilePath },
+          options: { mode: 'full', encoding: 'binary' }
+        },
         ctx
       )
     ).resolves.toBe(result)
@@ -95,7 +102,10 @@ describe('fileHandlers', () => {
     fileManager.read.mockResolvedValueOnce(result)
 
     await expect(
-      fileHandlers['file.read']({ handle: { kind: 'entry', entryId: ids[0] }, options: { encoding: 'binary' } }, ctx)
+      fileHandlers['file.read'](
+        { handle: { kind: 'entry', entryId: ids[0] }, options: { mode: 'full', encoding: 'binary' } },
+        ctx
+      )
     ).resolves.toBe(result)
 
     expect(fileManager.read).toHaveBeenCalledWith(ids[0], { encoding: 'binary' })
@@ -110,7 +120,7 @@ describe('fileHandlers', () => {
     await expect(
       fileHandlers['file.write_if_unchanged'](
         {
-          path: '/tmp/report.md',
+          path: '/tmp/report.md' as AbsoluteFilePath,
           data,
           expectedVersion
         },
@@ -126,10 +136,13 @@ describe('fileHandlers', () => {
     const expected = { mtime: 1, size: 4 }
     const current = { mtime: 2, size: 8 }
     writeIfUnchangedByPathMock.mockRejectedValueOnce(
-      new PathStaleVersionError('/tmp/report.md' as FilePath, expected, current)
+      new PathStaleVersionError('/tmp/report.md' as AbsoluteFilePath, expected, current)
     )
     await expect(
-      fileHandlers['file.write_if_unchanged']({ path: '/tmp/report.md', data, expectedVersion: expected }, ctx)
+      fileHandlers['file.write_if_unchanged'](
+        { path: '/tmp/report.md' as AbsoluteFilePath, data, expectedVersion: expected },
+        ctx
+      )
     ).rejects.toMatchObject({
       code: fileErrorCodes.STALE_VERSION,
       data: { expected, current }
@@ -139,7 +152,7 @@ describe('fileHandlers', () => {
   it('batch_get_metadata dispatches FileHandle items inside the IPC adapter', async () => {
     const items = [
       { key: ids[0], handle: { kind: 'entry' as const, entryId: ids[0] } },
-      { key: '/tmp/a.txt', handle: { kind: 'path' as const, path: '/tmp/a.txt' } },
+      { key: '/tmp/a.txt', handle: { kind: 'path' as const, path: '/tmp/a.txt' as AbsoluteFilePath } },
       { key: ids[1], handle: { kind: 'entry' as const, entryId: ids[1] } }
     ]
     fileManager.getMetadata.mockResolvedValueOnce(metadata).mockRejectedValueOnce(new Error('ENOENT'))
@@ -204,8 +217,8 @@ describe('fileHandlers', () => {
   })
 
   it('dispatches path system commands without FileManager entry lookup', async () => {
-    await fileHandlers['file.open']({ kind: 'path', path: '/tmp/report.md' }, ctx)
-    await fileHandlers['file.show_in_folder']({ kind: 'path', path: '/tmp/report.md' }, ctx)
+    await fileHandlers['file.open']({ kind: 'path', path: '/tmp/report.md' as AbsoluteFilePath }, ctx)
+    await fileHandlers['file.show_in_folder']({ kind: 'path', path: '/tmp/report.md' as AbsoluteFilePath }, ctx)
 
     expect(safeOpenMock).toHaveBeenCalledWith('/tmp/report.md')
     expect(showPathInFolderMock).toHaveBeenCalledWith('/tmp/report.md')
@@ -213,11 +226,37 @@ describe('fileHandlers', () => {
     expect(fileManager.showInFolder).not.toHaveBeenCalled()
   })
 
+  it('dispatches range reads for entry and path handles through file.read', async () => {
+    const entryResult = { content: new Uint8Array([1, 2, 3]), mime: 'application/pdf', version }
+    const pathResult = { content: new Uint8Array([4, 5]), mime: 'application/pdf', version }
+    fileManager.readChunk.mockResolvedValueOnce(entryResult)
+    readChunkByPathMock.mockResolvedValueOnce(pathResult)
+
+    await expect(
+      fileHandlers['file.read'](
+        { handle: { kind: 'entry', entryId: ids[0] }, options: { mode: 'range', offset: 10, length: 3 } },
+        ctx
+      )
+    ).resolves.toBe(entryResult)
+    await expect(
+      fileHandlers['file.read'](
+        {
+          handle: { kind: 'path', path: '/tmp/report.pdf' as AbsoluteFilePath },
+          options: { mode: 'range', offset: 20, length: 2 }
+        },
+        ctx
+      )
+    ).resolves.toBe(pathResult)
+
+    expect(fileManager.readChunk).toHaveBeenCalledWith(ids[0], 10, 3)
+    expect(readChunkByPathMock).toHaveBeenCalledWith('/tmp/report.pdf', 20, 2)
+  })
+
   it('delegates internal-entry batch create items to FileManager', async () => {
     const result = { succeeded: [{ id: ids[0], sourceRef: '/tmp/a.txt' }], failed: [] }
     const items = [
-      { source: 'path' as const, path: '/tmp/a.txt' },
-      { source: 'path' as const, path: '/tmp/b.txt' }
+      { source: 'path' as const, path: '/tmp/a.txt' as AbsoluteFilePath },
+      { source: 'path' as const, path: '/tmp/b.txt' as AbsoluteFilePath }
     ]
     fileManager.batchCreateInternalEntries.mockResolvedValue(result)
 
